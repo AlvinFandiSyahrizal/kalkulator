@@ -1,83 +1,61 @@
-// app/api/payment/create/route.js
+// src/app/api/payment/create/route.js
 
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { createSnapTransaction } from "@/lib/midtrans";
-import { nanoid } from "nanoid"; // npm install nanoid
+import { nanoid } from "nanoid";
 
 const PRICES = {
-  trial: parseInt(process.env.NEXT_PUBLIC_PRICE_TRIAL) || 10000,
-  lifetime: parseInt(process.env.NEXT_PUBLIC_PRICE_LIFETIME) || 50000,
+  trial:    parseInt(process.env.NEXT_PUBLIC_PRICE_TRIAL)    || 10000,
+  dlc:      parseInt(process.env.NEXT_PUBLIC_PRICE_DLC)      || 50000,
+  lifetime: parseInt(process.env.NEXT_PUBLIC_PRICE_LIFETIME) || 100000,
 };
-
 const TRIAL_USES = parseInt(process.env.NEXT_PUBLIC_TRIAL_USES) || 10;
+
+const PLAN_NAMES = {
+  trial:    `Standard Edition (${TRIAL_USES}× kalkulasi)`,
+  dlc:      "Advanced Math DLC (Permanent)",
+  lifetime: "Ultimate Edition (Lifetime Unlimited)",
+};
 
 export async function POST(request) {
   try {
     const { plan, sessionToken } = await request.json();
 
-    // Validasi input
-    if (!["trial", "lifetime"].includes(plan)) {
-      return NextResponse.json({ error: "Plan tidak valid" }, { status: 400 });
-    }
+    if (!["trial","dlc","lifetime"].includes(plan))
+      return NextResponse.json({ error:"Plan tidak valid" }, { status:400 });
+    if (!sessionToken || sessionToken.length < 10)
+      return NextResponse.json({ error:"Session token tidak valid" }, { status:400 });
 
-    if (!sessionToken || sessionToken.length < 10) {
-      return NextResponse.json({ error: "Session token tidak valid" }, { status: 400 });
-    }
-
-    // Pastikan session ada di DB, kalau tidak ada buat baru
+    // Upsert session
     await prisma.session.upsert({
-      where: { token: sessionToken },
+      where:  { token: sessionToken },
       create: { token: sessionToken },
-      update: {}, // tidak update apa-apa
+      update: {},
     });
 
-    // Cek apakah session sudah lifetime (tidak perlu beli lagi)
-    const session = await prisma.session.findUnique({
-      where: { token: sessionToken },
-    });
+    const session = await prisma.session.findUnique({ where:{ token: sessionToken } });
 
-    if (session?.plan === "lifetime") {
-      return NextResponse.json(
-        { error: "Kamu sudah punya akses lifetime bro!" },
-        { status: 400 }
-      );
-    }
+    // Guard: already lifetime
+    if (plan === "lifetime" && session?.plan === "lifetime")
+      return NextResponse.json({ error:"Sudah punya akses lifetime!" }, { status:400 });
 
-    // Buat order ID unik
+    // Guard: already has DLC
+    if (plan === "dlc" && session?.hasDlc)
+      return NextResponse.json({ error:"DLC sudah dimiliki!" }, { status:400 });
+
     const orderId = `KALKU-${nanoid(12).toUpperCase()}`;
-    const amount = PRICES[plan];
+    const amount  = PRICES[plan];
 
-    // Buat transaksi di Midtrans
-    const snapData = await createSnapTransaction({
-      orderId,
-      amount,
-      plan,
-      sessionToken,
-    });
+    const snapData = await createSnapTransaction({ orderId, amount, plan, sessionToken, itemName: PLAN_NAMES[plan] });
 
-    // Simpan transaksi ke DB
     await prisma.transaction.create({
-      data: {
-        orderId,
-        sessionToken,
-        amount,
-        plan,
-        status: "pending",
-        snapToken: snapData.token,
-      },
+      data: { orderId, sessionToken, amount, plan, status:"pending", snapToken: snapData.token },
     });
 
-    return NextResponse.json({
-      snapToken: snapData.token,
-      orderId,
-      redirectUrl: snapData.redirect_url,
-    });
-  } catch (error) {
-    console.error("Payment create error:", error);
-    return NextResponse.json(
-      { error: "Gagal membuat transaksi. Coba lagi." },
-      { status: 500 }
-    );
+    return NextResponse.json({ snapToken: snapData.token, orderId, redirectUrl: snapData.redirect_url });
+  } catch (e) {
+    console.error("Payment create error:", e);
+    return NextResponse.json({ error:"Gagal membuat transaksi." }, { status:500 });
   }
 }

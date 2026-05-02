@@ -1,3 +1,5 @@
+// prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,6 +13,7 @@ model Session {
   id        String   @id @default(cuid())
   token     String   @unique
   plan      String   @default("free")
+  hasDlc    Boolean  @default(false)
   usesLeft  Int      @default(0)
   totalUses Int      @default(0)
   createdAt DateTime @default(now())

@@ -1,44 +1,26 @@
 "use client";
 
-// components/PaywallModal.js
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const PRICE_TRIAL = parseInt(process.env.NEXT_PUBLIC_PRICE_TRIAL) || 10000;
 const PRICE_LIFETIME = parseInt(process.env.NEXT_PUBLIC_PRICE_LIFETIME) || 50000;
 const TRIAL_USES = parseInt(process.env.NEXT_PUBLIC_TRIAL_USES) || 10;
 
-const EA_MEMES = [
-  "Fitur ini memerlukan pembelian terpisah.",
-  "Hasil kalkulasi dijual secara terpisah dari soalnya.",
-  "Untuk melihat jawaban, diperlukan koneksi internet dan kartu kredit.",
-  "Hasilnya sudah selesai dihitung. Beli sekarang untuk melihatnya!",
-  "Operasi matematika ini tersedia sebagai DLC opsional.",
-  "Kalkulator dasar gratis. Hasilnya dijual terpisah.",
-];
-
-export default function PaywallModal({
-  isOpen,
-  onClose,
-  onSuccess,
-  sessionToken,
-  currentPlan,
-  usesLeft,
-}) {
+export default function PaywallModal({ isOpen, onClose, onSuccess, sessionToken, currentPlan, usesLeft }) {
   const [selectedPlan, setSelectedPlan] = useState("trial");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
-  const [meme] = useState(() => EA_MEMES[Math.floor(Math.random() * EA_MEMES.length)]);
+  const [phase, setPhase] = useState("reveal"); // "reveal" | "purchase" | "polling"
   const [pendingOrderId, setPendingOrderId] = useState(null);
-  const [isPolling, setIsPolling] = useState(false);
+  const audioCtxRef = useRef(null);
 
-  // Load Midtrans Snap script
+  // Load Midtrans Snap
   useEffect(() => {
     const clientKey = process.env.NEXT_PUBLIC_MIDTRANS_CLIENT_KEY;
     const isProduction = process.env.NEXT_PUBLIC_MIDTRANS_IS_PRODUCTION === "true";
     const snapUrl = isProduction
       ? "https://app.midtrans.com/snap/snap.js"
       : "https://app.sandbox.midtrans.com/snap/snap.js";
-
     if (!document.getElementById("midtrans-snap")) {
       const script = document.createElement("script");
       script.id = "midtrans-snap";
@@ -48,85 +30,89 @@ export default function PaywallModal({
     }
   }, []);
 
-  // Polling setelah payment (untuk kasus redirect)
+  // Play EA fanfare using Web Audio API
   useEffect(() => {
-    if (!pendingOrderId || !isPolling) return;
+    if (!isOpen) return;
+    setPhase("reveal");
 
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtxRef.current = ctx;
+
+      // EA-style triumphant fanfare notes
+      const notes = [
+        { freq: 523.25, start: 0.0, dur: 0.15 },   // C5
+        { freq: 659.25, start: 0.15, dur: 0.15 },  // E5
+        { freq: 783.99, start: 0.3, dur: 0.15 },   // G5
+        { freq: 1046.5, start: 0.45, dur: 0.4 },   // C6 — long hold
+        { freq: 880.0,  start: 0.85, dur: 0.15 },  // A5
+        { freq: 1046.5, start: 1.0, dur: 0.6 },    // C6 — finale
+      ];
+
+      notes.forEach(({ freq, start, dur }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+        gain.gain.setValueAtTime(0, ctx.currentTime + start);
+        gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + dur + 0.05);
+      });
+    } catch { /* audio blocked, skip */ }
+
+    // After reveal animation, show purchase UI
+    const t = setTimeout(() => setPhase("purchase"), 2200);
+    return () => clearTimeout(t);
+  }, [isOpen]);
+
+  // Polling
+  useEffect(() => {
+    if (!pendingOrderId || phase !== "polling") return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(
-          `/api/payment/verify?orderId=${pendingOrderId}&token=${sessionToken}`
-        );
+        const res = await fetch(`/api/payment/verify?orderId=${pendingOrderId}&token=${sessionToken}`);
         const data = await res.json();
-
         if (data.isSuccess) {
           clearInterval(interval);
-          setIsPolling(false);
-          setPendingOrderId(null);
-          onSuccess(data);
+          onSuccess({ plan: data.plan, usesLeft: data.usesLeft });
         } else if (data.status === "failed") {
           clearInterval(interval);
-          setIsPolling(false);
           setError("Pembayaran gagal atau dibatalkan.");
+          setPhase("purchase");
         }
-      } catch {
-        // Tetap polling
-      }
-    }, 2000); // cek setiap 2 detik
-
+      } catch { /* keep polling */ }
+    }, 2000);
     return () => clearInterval(interval);
-  }, [pendingOrderId, isPolling, sessionToken, onSuccess]);
+  }, [pendingOrderId, phase, sessionToken, onSuccess]);
 
   const handleBuy = async () => {
     setIsLoading(true);
     setError("");
-
     try {
       const res = await fetch("/api/payment/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ plan: selectedPlan, sessionToken }),
       });
-
       const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.error || "Gagal membuat transaksi.");
-        setIsLoading(false);
-        return;
-      }
-
+      if (!res.ok) { setError(data.error || "Gagal."); setIsLoading(false); return; }
       setPendingOrderId(data.orderId);
-
-      // Buka Midtrans Snap popup
       if (window.snap) {
         window.snap.pay(data.snapToken, {
-          onSuccess: (result) => {
-            console.log("Payment success:", result);
-            setIsPolling(true); // mulai polling sampai webhook konfirmasi
-          },
-          onPending: (result) => {
-            console.log("Payment pending:", result);
-            setIsPolling(true);
-          },
-          onError: (result) => {
-            console.error("Payment error:", result);
-            setError("Pembayaran gagal. Coba lagi.");
-            setIsLoading(false);
-          },
-          onClose: () => {
-            console.log("Snap ditutup");
-            setIsLoading(false);
-            // Tetap polling kalau order sudah dibuat
-            if (pendingOrderId) setIsPolling(true);
-          },
+          onSuccess: () => { setPhase("polling"); setIsLoading(false); },
+          onPending: () => { setPhase("polling"); setIsLoading(false); },
+          onError: () => { setError("Pembayaran gagal."); setIsLoading(false); },
+          onClose: () => { setIsLoading(false); if (pendingOrderId) setPhase("polling"); },
         });
       } else {
-        // Fallback: redirect ke halaman Midtrans
         window.location.href = data.redirectUrl;
       }
     } catch {
-      setError("Gagal terhubung. Periksa koneksi internet.");
+      setError("Gagal terhubung.");
       setIsLoading(false);
     }
   };
@@ -134,93 +120,85 @@ export default function PaywallModal({
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-box">
-        {/* Header */}
-        <div className="modal-header">
-          <div className="modal-logo">EA</div>
-          <h2 className="modal-title">KONTEN PREMIUM DIPERLUKAN</h2>
-          <p className="modal-meme">&ldquo;{meme}&rdquo;</p>
-        </div>
+    <div className="pw-overlay">
+      <div className={`pw-box ${phase === "reveal" ? "pw-reveal" : ""}`}>
 
-        {/* Polling state */}
-        {isPolling && (
-          <div className="polling-notice">
-            <div className="spinner" />
-            Menunggu konfirmasi pembayaran...
+        {/* ── PHASE: REVEAL ── */}
+        {phase === "reveal" && (
+          <div className="pw-fanfare">
+            <div className="pw-ea-logo">EA</div>
+            <div className="pw-fanfare-text">PURCHASE REQUIRED</div>
+            <div className="pw-scanline" />
           </div>
         )}
 
-        {!isPolling && (
-          <>
-            {/* Plan selector */}
-            <div className="plan-grid">
+        {/* ── PHASE: PURCHASE ── */}
+        {phase === "purchase" && (
+          <div className="pw-content">
+            <div className="pw-header">
+              <div className="pw-ea-small">EA</div>
+              <div className="pw-title-group">
+                <h2 className="pw-title">RESULT LOCKED</h2>
+                <p className="pw-sub">This feature requires a separate purchase.</p>
+              </div>
+            </div>
+
+            <div className="pw-divider" />
+
+            <div className="pw-plans">
               {/* Trial */}
               <div
-                className={`plan-card ${selectedPlan === "trial" ? "selected" : ""}`}
+                className={`pw-plan ${selectedPlan === "trial" ? "pw-plan-active" : ""}`}
                 onClick={() => setSelectedPlan("trial")}
               >
-                <div className="plan-tag">STARTER PACK</div>
-                <div className="plan-name">Trial</div>
-                <div className="plan-price">
-                  Rp {PRICE_TRIAL.toLocaleString("id-ID")}
+                <div className="pw-plan-check">{selectedPlan === "trial" ? "●" : "○"}</div>
+                <div className="pw-plan-info">
+                  <div className="pw-plan-name">Standard Edition</div>
+                  <div className="pw-plan-desc">{TRIAL_USES}× result unlocks</div>
                 </div>
-                <ul className="plan-features">
-                  <li>✓ {TRIAL_USES}x kalkulasi</li>
-                  <li>✓ Semua operasi matematika</li>
-                  <li>✗ Tidak berlaku selamanya</li>
-                  <li>✗ Hasil kalkulasi kedaluwarsa?</li>
-                </ul>
-                <div className="plan-disclaimer">
-                  *Hasil hanya boleh dilihat {TRIAL_USES} kali
-                </div>
+                <div className="pw-plan-price">Rp {PRICE_TRIAL.toLocaleString("id-ID")}</div>
               </div>
 
               {/* Lifetime */}
               <div
-                className={`plan-card featured ${selectedPlan === "lifetime" ? "selected" : ""}`}
+                className={`pw-plan pw-plan-featured ${selectedPlan === "lifetime" ? "pw-plan-active" : ""}`}
                 onClick={() => setSelectedPlan("lifetime")}
               >
-                <div className="plan-tag popular">PALING POPULER ⭐</div>
-                <div className="plan-name">Ultimate Edition</div>
-                <div className="plan-price">
-                  Rp {PRICE_LIFETIME.toLocaleString("id-ID")}
+                <div className="pw-plan-badge">BEST VALUE</div>
+                <div className="pw-plan-check">{selectedPlan === "lifetime" ? "●" : "○"}</div>
+                <div className="pw-plan-info">
+                  <div className="pw-plan-name">Ultimate Edition</div>
+                  <div className="pw-plan-desc">Unlimited · Lifetime access</div>
                 </div>
-                <ul className="plan-features">
-                  <li>✓ Kalkulasi unlimited</li>
-                  <li>✓ Semua operasi matematika</li>
-                  <li>✓ Berlaku selamanya*</li>
-                  <li>✓ Akses semua DLC future</li>
-                </ul>
-                <div className="plan-disclaimer">
-                  *Selama server kami masih hidup
-                </div>
+                <div className="pw-plan-price">Rp {PRICE_LIFETIME.toLocaleString("id-ID")}</div>
               </div>
             </div>
 
-            {/* Error */}
-            {error && <div className="modal-error">⚠ {error}</div>}
+            {error && <div className="pw-error">{error}</div>}
 
-            {/* CTA */}
-            <button
-              className="modal-buy-btn"
-              onClick={handleBuy}
-              disabled={isLoading}
-            >
-              {isLoading
-                ? "MEMUAT PAYMENT GATEWAY..."
-                : `BELI SEKARANG — Rp ${(selectedPlan === "trial" ? PRICE_TRIAL : PRICE_LIFETIME).toLocaleString("id-ID")}`}
+            <button className="pw-buy-btn" onClick={handleBuy} disabled={isLoading}>
+              {isLoading ? "LOADING..." : `UNLOCK NOW — Rp ${(selectedPlan === "trial" ? PRICE_TRIAL : PRICE_LIFETIME).toLocaleString("id-ID")}`}
             </button>
 
-            <button className="modal-close-btn" onClick={onClose}>
-              Nanti saja (Kalkulator tetap tidak akan bisa dipakai)
+            <button className="pw-skip-btn" onClick={onClose}>
+              Maybe later (calculator will remain locked)
             </button>
 
-            <p className="modal-footer-text">
-              Dengan membeli, kamu setuju bahwa ini adalah lelucon dan tidak ada yang tersakiti.
-              Uang nyata tetap dibutuhkan karena server tidak gratis. EA tidak berafiliasi dengan proyek ini.
+            <p className="pw-legal">
+              *This is a parody project. Not affiliated with EA Games.
+              Payment goes to server costs, not yachts.
             </p>
-          </>
+          </div>
+        )}
+
+        {/* ── PHASE: POLLING ── */}
+        {phase === "polling" && (
+          <div className="pw-polling">
+            <div className="pw-ea-small">EA</div>
+            <div className="pw-spinner" />
+            <p>Verifying purchase...</p>
+            <p className="pw-polling-sub">Please do not close this window</p>
+          </div>
         )}
       </div>
     </div>

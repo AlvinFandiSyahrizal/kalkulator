@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import PaywallModal from "./PaywallModal";
 
-// ─── Math helpers ───────────────────────────────────────
+// ─── Math helpers ─────────────────────────────────────────
 function factorial(n) {
   n = Math.floor(Math.abs(n));
   if (n > 170) return Infinity;
@@ -32,249 +32,341 @@ function fmt(n) {
   if (!isFinite(n)) return n > 0 ? "∞" : "-∞";
   return String(parseFloat(n.toPrecision(12)));
 }
+function compute(a, b, op) {
+  switch (op) {
+    case "+": return a + b;
+    case "-": return a - b;
+    case "*": return a * b;
+    case "/": return b !== 0 ? a / b : NaN;
+    default:  return b;
+  }
+}
 
-// ─── DLC operations ──────────────────────────────────────
+const SYM = { "+": "+", "-": "−", "*": "×", "/": "÷" };
+
 const DLC_OPS = [
-  { id:"sqrt",    label:"√x",     tip:"Akar kuadrat",                    unary:true,  fn:(a)=>Math.sqrt(a) },
-  { id:"cbrt",    label:"∛x",     tip:"Akar kubik",                       unary:true,  fn:(a)=>Math.cbrt(a) },
-  { id:"pow",     label:"xⁿ",     tip:"Pangkat (a pangkat b)",            unary:false, fn:(a,b)=>Math.pow(a,b) },
-  { id:"log",     label:"log",    tip:"Logaritma basis 10",               unary:true,  fn:(a)=>Math.log10(a) },
-  { id:"ln",      label:"ln",     tip:"Logaritma natural",                unary:true,  fn:(a)=>Math.log(a) },
-  { id:"sin",     label:"sin",    tip:"Sinus (derajat)",                  unary:true,  fn:(a)=>Math.sin(a*Math.PI/180) },
-  { id:"cos",     label:"cos",    tip:"Kosinus (derajat)",                unary:true,  fn:(a)=>Math.cos(a*Math.PI/180) },
-  { id:"tan",     label:"tan",    tip:"Tangen (derajat)",                 unary:true,  fn:(a)=>Math.tan(a*Math.PI/180) },
-  { id:"fact",    label:"n!",     tip:"Faktorial",                        unary:true,  fn:(a)=>factorial(a) },
-  { id:"abs",     label:"|x|",    tip:"Nilai mutlak",                     unary:true,  fn:(a)=>Math.abs(a) },
-  { id:"gcd",     label:"FPB",    tip:"Faktor Persekutuan Terbesar (a,b)",unary:false, fn:(a,b)=>gcd(a,b) },
-  { id:"lcm",     label:"KPK",    tip:"Kelipatan Persekutuan Terkecil (a,b)",unary:false,fn:(a,b)=>lcm(a,b)},
-  { id:"mod",     label:"mod",    tip:"Modulo / sisa bagi (a mod b)",     unary:false, fn:(a,b)=>a%b },
-  { id:"prime",   label:"prima?", tip:"Cek bilangan prima",               unary:true,  fn:(a)=>isPrime(Math.floor(a))?"Prima ✓":"Bukan prima" },
-  { id:"factors", label:"faktor", tip:"Faktor prima",                     unary:true,  fn:(a)=>primeFactors(a) },
+  { id:"sqrt",    label:"√x",     tip:"Akar kuadrat",                        unary:true,  fn:(a)=>Math.sqrt(a) },
+  { id:"cbrt",    label:"∛x",     tip:"Akar kubik",                           unary:true,  fn:(a)=>Math.cbrt(a) },
+  { id:"pow",     label:"xⁿ",     tip:"Pangkat (a pangkat b)",                unary:false, fn:(a,b)=>Math.pow(a,b) },
+  { id:"log",     label:"log",    tip:"Logaritma basis 10",                   unary:true,  fn:(a)=>Math.log10(a) },
+  { id:"ln",      label:"ln",     tip:"Logaritma natural",                    unary:true,  fn:(a)=>Math.log(a) },
+  { id:"sin",     label:"sin",    tip:"Sinus (derajat)",                      unary:true,  fn:(a)=>Math.sin(a*Math.PI/180) },
+  { id:"cos",     label:"cos",    tip:"Kosinus (derajat)",                    unary:true,  fn:(a)=>Math.cos(a*Math.PI/180) },
+  { id:"tan",     label:"tan",    tip:"Tangen (derajat)",                     unary:true,  fn:(a)=>Math.tan(a*Math.PI/180) },
+  { id:"fact",    label:"n!",     tip:"Faktorial",                            unary:true,  fn:(a)=>factorial(a) },
+  { id:"abs",     label:"|x|",    tip:"Nilai mutlak",                         unary:true,  fn:(a)=>Math.abs(a) },
+  { id:"gcd",     label:"FPB",    tip:"Faktor Persekutuan Terbesar (a,b)",    unary:false, fn:(a,b)=>gcd(a,b) },
+  { id:"lcm",     label:"KPK",    tip:"Kelipatan Persekutuan Terkecil (a,b)", unary:false, fn:(a,b)=>lcm(a,b) },
+  { id:"mod",     label:"mod",    tip:"Modulo / sisa bagi (a mod b)",         unary:false, fn:(a,b)=>a%b },
+  { id:"prime",   label:"prima?", tip:"Cek bilangan prima",                   unary:true,  fn:(a)=>isPrime(Math.floor(a))?"Prima ✓":"Bukan prima" },
+  { id:"factors", label:"faktor", tip:"Faktor prima",                         unary:true,  fn:(a)=>primeFactors(a) },
 ];
 
+// ─── State machine yang jelas ─────────────────────────────
+// calc state disimpan semua di satu ref object
+// → tidak ada stale closure sama sekali
+function makeState() {
+  return {
+    a:        null,   // operand pertama
+    op:       null,   // operator pending
+    b:        "",     // operand kedua (string sementara)
+    display:  "0",    // apa yang ditampilkan
+    expr:     "",     // baris atas (expression)
+    fresh:    false,  // kalau true, digit berikutnya reset display
+    done:     false,  // habis tekan =
+    dlcOp:    null,   // kalau lagi tunggu operand ke-2 DLC
+    dlcRes:   null,   // hasil DLC (untuk tampil special)
+  };
+}
+
 export default function Calculator({ sessionToken, sessionData, onSessionUpdate }) {
-  const [display, setDisplay]       = useState("0");
-  const [expression, setExpression] = useState("");
-  const [storedVal, setStoredVal]   = useState(null);
-  const [pendingOp, setPendingOp]   = useState(null);
-  const [justCalc, setJustCalc]     = useState(false);
-  const [freshInput, setFreshInput] = useState(false);
-  const [paywallType, setPaywallType] = useState(null); // "result" | "dlc"
-  const [pendingDlc, setPendingDlc] = useState(null);
-  const [dlcResult, setDlcResult]   = useState(null);
-  const [dlcTwoStep, setDlcTwoStep] = useState(null); // waiting for 2nd operand
-  const wrapRef = useRef(null);
+  const cs            = useRef(makeState());   // calculator state
+  const [ui, setUi]   = useState(makeState()); // untuk trigger render
+  const wrapRef       = useRef(null);
+  const [paywallType, setPaywallType] = useState(null);
+  const [pendingDlc,  setPendingDlc]  = useState(null);
 
-  const hasDlc  = sessionData?.hasDlc;
   const canCalc = sessionData?.canCalculate;
+  const hasDlc  = sessionData?.hasDlc;
 
-  // keep focus on wrapper for keyboard
+  // sync refs agar event handler selalu up to date
+  const canCalcRef = useRef(canCalc);
+  const hasDlcRef  = useRef(hasDlc);
+  canCalcRef.current = canCalc;
+  hasDlcRef.current  = hasDlc;
+
   useEffect(() => { wrapRef.current?.focus(); }, []);
 
-  // ── Keyboard ──────────────────────────────────────────
-  const handleKey = useCallback((e) => {
-    if (paywallType) return;
-    const k = e.key;
-    if (k >= "0" && k <= "9")          { e.preventDefault(); pressDigit(k); }
-    else if (k === ".")                 { e.preventDefault(); pressDot(); }
-    else if (["+","-","*","/"].includes(k)) { e.preventDefault(); pressOp(k); }
-    else if (k === "Enter" || k === "="){ e.preventDefault(); pressEquals(); }
-    else if (k === "Backspace")         { e.preventDefault(); pressBack(); }
-    else if (k === "Escape")            { e.preventDefault(); pressClear(); }
-    else if (k === "%")                 { e.preventDefault(); pressPercent(); }
-  }, [paywallType, display, storedVal, pendingOp, justCalc, canCalc, expression]);
+  // Commit state ke UI
+  function commit() { setUi({ ...cs.current }); }
 
-  // ── Core calc ─────────────────────────────────────────
-function pressDigit(d) {
-  setDlcResult(null); setDlcTwoStep(null);
-  if (justCalc || freshInput) {
-    setDisplay(d);
-    setFreshInput(false);
-    setJustCalc(false);
-    return;
-  }
-  setDisplay(p => p === "0" ? d : p.length >= 15 ? p : p + d);
-  setExpression(p => p === "" ? d : p + d);
-}
+  // ─── Digit ──────────────────────────────────────────────
+  function pressDigit(d) {
+    const s = cs.current;
+    s.dlcRes = null;
 
-function pressDot() {
-  setDlcResult(null);
-  if (justCalc || freshInput) {
-    setDisplay("0."); setExpression(expression + "0.");
-    setFreshInput(false); setJustCalc(false); return;
-  }
-  if (!display.includes(".")) {
-    setDisplay(p => p + "."); setExpression(p => p + ".");
-  }
-}
-
-function pressOp(op) {
-  setDlcResult(null); setDlcTwoStep(null);
-  const val = parseFloat(display);
-  const sym = { "+":"+", "-":"−", "*":"×", "/":"÷" }[op];
-  if (storedVal !== null && pendingOp && !justCalc && !freshInput) {
-    const res = compute(storedVal, val, pendingOp);
-    setDisplay(fmt(res)); setStoredVal(res);
-    setExpression(fmt(res) + " " + sym + " ");
-  } else {
-    setStoredVal(val);
-    setExpression(display + " " + sym + " ");
-  }
-  setPendingOp(op);
-  setJustCalc(false);
-  setFreshInput(true); // ← flag: next digit mulai fresh
-}
-
-  async function pressEquals() {
-    if (!canCalc) { setPaywallType("result"); return; }
-    try {
-      const res = await fetch("/api/usage", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ sessionToken }),
-      });
-      const data = await res.json();
-      if (!data.success) { setPaywallType("result"); return; }
-      onSessionUpdate({ ...sessionData, usesLeft:data.usesLeft, plan:data.plan, canCalculate: data.plan==="lifetime"||data.usesLeft>0 });
-    } catch { setPaywallType("result"); return; }
-
-    if (storedVal !== null && pendingOp) {
-      const val = parseFloat(display);
-      const res = compute(storedVal, val, pendingOp);
-      setExpression(expression + display + " =");
-      setDisplay(fmt(res)); setDlcResult(null);
-      setStoredVal(null); setPendingOp(null); setJustCalc(true);
-    }
-  }
-
-  function pressClear() {
-    setDisplay("0"); setExpression(""); setStoredVal(null);
-    setPendingOp(null); setJustCalc(false); setDlcResult(null); setDlcTwoStep(null);
-  }
-  function pressBack() {
-    if (justCalc) { pressClear(); return; }
-    setDisplay(p => p.length > 1 ? p.slice(0,-1) : "0");
-  }
-  function pressPlusMinus() { setDisplay(p => String(parseFloat(p)*-1)); }
-  function pressPercent()   { setDisplay(p => String(parseFloat(p)/100)); setDlcResult(null); }
-
-  function compute(a, b, op) {
-    switch(op) {
-      case "+": return a+b; case "-": return a-b;
-      case "*": return a*b; case "/": return b!==0?a/b:NaN;
-      default: return b;
-    }
-  }
-
-  // ── DLC ───────────────────────────────────────────────
-  function pressDlc(op) {
-    if (!hasDlc) { setPendingDlc(op); setPaywallType("dlc"); return; }
-    const a = parseFloat(display);
-    if (op.unary) {
-      const res = op.fn(a);
-      setDlcResult({ label:`${op.label}(${a})`, value: typeof res==="string"?res:fmt(res) });
-      setStoredVal(null); setPendingOp(null); setJustCalc(true);
+    if (s.fresh || s.done) {
+      // mulai angka baru
+      s.display = d === "0" ? "0" : d;
+      s.fresh = false;
+      s.done  = false;
+      // kalau ada operator pending, update expr dengan angka baru
+      if (s.op !== null) {
+        s.expr = `${s.a} ${SYM[s.op]} ${s.display}`;
+      } else {
+        s.expr = s.display;
+      }
     } else {
-      // 2-operand: store first value and wait
-      setDlcTwoStep(op);
-      setStoredVal(a);
-      setExpression(`${op.label}(${a}, `);
-      setDisplay("0"); setJustCalc(false);
+      // append digit
+      if (s.display === "0") s.display = d;
+      else if (s.display.length < 15) s.display += d;
+      // sync expr
+      if (s.op !== null) {
+        s.expr = `${s.a} ${SYM[s.op]} ${s.display}`;
+      } else {
+        s.expr = s.display;
+      }
     }
+    commit();
   }
 
-  // When in dlcTwoStep mode, pressing = computes the dlc op
-  async function pressDlcEquals() {
-    if (!canCalc) { setPaywallType("result"); return; }
+  // ─── Dot ────────────────────────────────────────────────
+  function pressDot() {
+    const s = cs.current;
+    s.dlcRes = null;
+    if (s.fresh || s.done) {
+      s.display = "0.";
+      s.fresh = false;
+      s.done  = false;
+      if (s.op !== null) s.expr = `${s.a} ${SYM[s.op]} 0.`;
+      else s.expr = "0.";
+    } else if (!s.display.includes(".")) {
+      s.display += ".";
+      if (s.op !== null) s.expr = `${s.a} ${SYM[s.op]} ${s.display}`;
+      else s.expr += ".";
+    }
+    commit();
+  }
+
+  // ─── Operator ───────────────────────────────────────────
+  function pressOp(op) {
+    const s = cs.current;
+    s.dlcRes = null;
+    s.dlcOp  = null;
+    const val = parseFloat(s.display);
+
+    if (s.a !== null && s.op !== null && !s.fresh && !s.done) {
+      // chain: hitung dulu yang lama
+      const res = compute(s.a, val, s.op);
+      s.a       = res;
+      s.display = fmt(res);
+    } else {
+      s.a = val;
+    }
+
+    s.op    = op;
+    s.fresh = true;
+    s.done  = false;
+    s.expr  = `${s.a} ${SYM[op]} `;
+    commit();
+  }
+
+  // ─── Equals ─────────────────────────────────────────────
+  async function pressEquals() {
+    if (!canCalcRef.current) { setPaywallType("result"); return; }
+
+    // consume token
     try {
-      const res = await fetch("/api/usage", {
-        method:"POST", headers:{"Content-Type":"application/json"},
+      const res  = await fetch("/api/usage", {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionToken }),
       });
       const data = await res.json();
       if (!data.success) { setPaywallType("result"); return; }
-      onSessionUpdate({ ...sessionData, usesLeft:data.usesLeft, plan:data.plan, canCalculate: data.plan==="lifetime"||data.usesLeft>0 });
+      onSessionUpdate({
+        ...sessionData, usesLeft: data.usesLeft, plan: data.plan,
+        canCalculate: data.plan === "lifetime" || data.usesLeft > 0,
+      });
     } catch { setPaywallType("result"); return; }
 
-    const b = parseFloat(display);
-    const res = dlcTwoStep.fn(storedVal, b);
-    setDlcResult({ label:`${dlcTwoStep.label}(${storedVal}, ${b})`, value: typeof res==="string"?res:fmt(res) });
-    setDlcTwoStep(null); setStoredVal(null); setPendingOp(null); setJustCalc(true);
+    const s = cs.current;
+    if (s.dlcOp) { await pressDlcEquals(); return; }
+    if (s.a === null || s.op === null) return;
+
+    const b   = parseFloat(s.display);
+    const res = compute(s.a, b, s.op);
+    s.expr    = `${s.a} ${SYM[s.op]} ${b} =`;
+    s.display = fmt(res);
+    s.dlcRes  = null;
+    s.a       = null;
+    s.op      = null;
+    s.fresh   = false;
+    s.done    = true;
+    commit();
+  }
+
+  // ─── DLC Equals ─────────────────────────────────────────
+  async function pressDlcEquals() {
+    if (!canCalcRef.current) { setPaywallType("result"); return; }
+    try {
+      const res  = await fetch("/api/usage", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionToken }),
+      });
+      const data = await res.json();
+      if (!data.success) { setPaywallType("result"); return; }
+      onSessionUpdate({
+        ...sessionData, usesLeft: data.usesLeft, plan: data.plan,
+        canCalculate: data.plan === "lifetime" || data.usesLeft > 0,
+      });
+    } catch { setPaywallType("result"); return; }
+
+    const s  = cs.current;
+    const op = s.dlcOp;
+    const b  = parseFloat(s.display);
+    const r  = op.fn(s.a, b);
+    s.dlcRes  = { label: `${op.label}(${s.a}, ${b})`, value: typeof r === "string" ? r : fmt(r) };
+    s.dlcOp   = null;
+    s.a       = null;
+    s.op      = null;
+    s.done    = true;
+    s.fresh   = false;
+    commit();
   }
 
   function handleEqualPress() {
-    if (dlcTwoStep) { pressDlcEquals(); } else { pressEquals(); }
+    const s = cs.current;
+    if (s.dlcOp) pressDlcEquals();
+    else pressEquals();
   }
 
+  // ─── Clear / Back ────────────────────────────────────────
+  function pressClear() { cs.current = makeState(); commit(); }
+
+  function pressBack() {
+    const s = cs.current;
+    if (s.done) { pressClear(); return; }
+    if (s.display.length > 1) {
+      s.display = s.display.slice(0, -1);
+    } else {
+      s.display = "0";
+    }
+    if (s.op !== null) s.expr = `${s.a} ${SYM[s.op]} ${s.display}`;
+    else s.expr = s.display;
+    commit();
+  }
+
+  function pressPlusMinus() {
+    const s = cs.current;
+    s.display = String(parseFloat(s.display) * -1);
+    commit();
+  }
+
+  function pressPercent() {
+    const s = cs.current;
+    s.display = String(parseFloat(s.display) / 100);
+    s.dlcRes  = null;
+    commit();
+  }
+
+  // ─── DLC ────────────────────────────────────────────────
+  function pressDlc(op) {
+    if (!hasDlcRef.current) { setPendingDlc(op); setPaywallType("dlc"); return; }
+    const s = cs.current;
+    const a = parseFloat(s.display);
+
+    if (op.unary) {
+      const res = op.fn(a);
+      s.dlcRes  = { label: `${op.label}(${a})`, value: typeof res === "string" ? res : fmt(res) };
+      s.a       = null; s.op = null; s.done = true; s.fresh = false;
+      commit();
+    } else {
+      // 2-operand DLC: tunggu angka kedua
+      s.dlcOp   = op;
+      s.a       = a;
+      s.op      = null;
+      s.display = "0";
+      s.expr    = `${op.label}(${a}, `;
+      s.fresh   = true;
+      s.done    = false;
+      s.dlcRes  = null;
+      commit();
+    }
+  }
+
+  // ─── Keyboard ───────────────────────────────────────────
+  function handleKey(e) {
+    if (paywallType) return;
+    const k = e.key;
+    if (k >= "0" && k <= "9")              { e.preventDefault(); pressDigit(k); }
+    else if (k === ".")                     { e.preventDefault(); pressDot(); }
+    else if (["+","-","*","/"].includes(k)) { e.preventDefault(); pressOp(k); }
+    else if (k === "Enter" || k === "=")    { e.preventDefault(); handleEqualPress(); }
+    else if (k === "Backspace")             { e.preventDefault(); pressBack(); }
+    else if (k === "Escape")               { e.preventDefault(); pressClear(); }
+    else if (k === "%")                    { e.preventDefault(); pressPercent(); }
+  }
+
+  // ─── Keypad ──────────────────────────────────────────────
   const opKeys = [
-    { label:"AC",  action:pressClear,           type:"fn" },
-    { label:"+/−", action:pressPlusMinus,        type:"fn" },
-    { label:"%",   action:pressPercent,          type:"fn" },
-    { label:"÷",   action:()=>pressOp("/"),      type:"op", op:"/" },
-    { label:"7",   action:()=>pressDigit("7"),   type:"num" },
-    { label:"8",   action:()=>pressDigit("8"),   type:"num" },
-    { label:"9",   action:()=>pressDigit("9"),   type:"num" },
-    { label:"×",   action:()=>pressOp("*"),      type:"op", op:"*" },
-    { label:"4",   action:()=>pressDigit("4"),   type:"num" },
-    { label:"5",   action:()=>pressDigit("5"),   type:"num" },
-    { label:"6",   action:()=>pressDigit("6"),   type:"num" },
-    { label:"−",   action:()=>pressOp("-"),      type:"op", op:"-" },
-    { label:"1",   action:()=>pressDigit("1"),   type:"num" },
-    { label:"2",   action:()=>pressDigit("2"),   type:"num" },
-    { label:"3",   action:()=>pressDigit("3"),   type:"num" },
-    { label:"+",   action:()=>pressOp("+"),      type:"op", op:"+" },
-    { label:"⌫",   action:pressBack,             type:"fn" },
-    { label:"0",   action:()=>pressDigit("0"),   type:"num" },
-    { label:".",   action:pressDot,              type:"num" },
-    { label:"=",   action:handleEqualPress,      type:"eq" },
+    { label:"AC",  action:pressClear,         type:"fn" },
+    { label:"+/−", action:pressPlusMinus,      type:"fn" },
+    { label:"%",   action:pressPercent,        type:"fn" },
+    { label:"÷",   action:()=>pressOp("/"),    type:"op", op:"/" },
+    { label:"7",   action:()=>pressDigit("7"), type:"num" },
+    { label:"8",   action:()=>pressDigit("8"), type:"num" },
+    { label:"9",   action:()=>pressDigit("9"), type:"num" },
+    { label:"×",   action:()=>pressOp("*"),    type:"op", op:"*" },
+    { label:"4",   action:()=>pressDigit("4"), type:"num" },
+    { label:"5",   action:()=>pressDigit("5"), type:"num" },
+    { label:"6",   action:()=>pressDigit("6"), type:"num" },
+    { label:"−",   action:()=>pressOp("-"),    type:"op", op:"-" },
+    { label:"1",   action:()=>pressDigit("1"), type:"num" },
+    { label:"2",   action:()=>pressDigit("2"), type:"num" },
+    { label:"3",   action:()=>pressDigit("3"), type:"num" },
+    { label:"+",   action:()=>pressOp("+"),    type:"op", op:"+" },
+    { label:"⌫",   action:pressBack,           type:"fn" },
+    { label:"0",   action:()=>pressDigit("0"), type:"num" },
+    { label:".",   action:pressDot,            type:"num" },
+    { label:"=",   action:handleEqualPress,    type:"eq" },
   ];
+
+  const { display, expr, dlcRes, dlcOp, op: activeOp } = ui;
 
   return (
     <>
-      <div
-        className="calc-wrap"
-        ref={wrapRef}
-        tabIndex={0}
-        onKeyDown={handleKey}
-        style={{ outline:"none" }}
-      >
-        {/* ── Display ── */}
+      <div className="calc-wrap" ref={wrapRef} tabIndex={0} onKeyDown={handleKey} style={{outline:"none"}}>
+
+        {/* Display */}
         <div className="calc-display">
-          <div className="calc-expr">{expression || "\u00a0"}</div>
-          {dlcResult ? (
+          <div className="calc-expr">{expr || "\u00a0"}</div>
+          {dlcRes ? (
             <div className="calc-dlc-result">
-              <div className="calc-dlc-label">{dlcResult.label} =</div>
-              <div className="calc-dlc-value">{dlcResult.value}</div>
+              <div className="calc-dlc-label">{dlcRes.label} =</div>
+              <div className="calc-dlc-value">{dlcRes.value}</div>
             </div>
           ) : (
             <div className="calc-num"
-              style={{ fontSize: display.length > 10 ? "32px" : display.length > 7 ? "42px" : "56px" }}>
+              style={{fontSize: display.length > 10 ? "30px" : display.length > 7 ? "40px" : "56px"}}>
               {display}
             </div>
           )}
-          {dlcTwoStep && (
-            <div className="calc-dlc-hint">masukkan angka kedua, lalu tekan =</div>
-          )}
+          {dlcOp && <div className="calc-dlc-hint">masukkan angka kedua lalu tekan =</div>}
         </div>
 
-        {/* ── DLC Panel ── */}
+        {/* DLC Panel */}
         <div className="dlc-panel">
           <div className="dlc-header">
             <span className="dlc-label-text">ADVANCED MATH</span>
-            {!hasDlc && (
-              <span className="dlc-badge-locked">🔒 Klik untuk buka</span>
-            )}
-            {hasDlc && (
-              <span className="dlc-badge-owned">✓ UNLOCKED</span>
-            )}
+            {hasDlc
+              ? <span className="dlc-badge-owned">✓ UNLOCKED</span>
+              : <span className="dlc-badge-locked">🔒 Klik untuk buka</span>}
           </div>
           <div className="dlc-grid">
             {DLC_OPS.map(op => (
-              <button
-                key={op.id}
+              <button key={op.id}
                 className={`dlc-btn${hasDlc ? "" : " dlc-btn-locked"}`}
-                onClick={() => pressDlc(op)}
-                title={op.tip}
-              >
+                onClick={() => pressDlc(op)} title={op.tip}>
                 <span className="dlc-btn-label">{op.label}</span>
                 {!hasDlc && <span className="dlc-icon-lock">🔒</span>}
               </button>
@@ -282,14 +374,12 @@ function pressOp(op) {
           </div>
         </div>
 
-        {/* ── Basic Keypad ── */}
+        {/* Keypad */}
         <div className="calc-grid">
           {opKeys.map((k, i) => (
-            <button
-              key={i}
-              className={`key type-${k.type}${pendingOp === k.op ? " key-op-active" : ""}`}
-              onClick={k.action}
-            >
+            <button key={i}
+              className={`key type-${k.type}${activeOp === k.op ? " key-op-active" : ""}`}
+              onClick={k.action}>
               {k.label}
             </button>
           ))}
@@ -301,12 +391,14 @@ function pressOp(op) {
         type={paywallType}
         onClose={() => { setPaywallType(null); setPendingDlc(null); }}
         onSuccess={(data) => {
+          const type = paywallType;
+          const dlc  = pendingDlc;
           setPaywallType(null);
-          onSessionUpdate({ ...sessionData, ...data });
-          if (paywallType === "dlc" && pendingDlc && data.hasDlc) {
-            setTimeout(() => pressDlc(pendingDlc), 400);
-          }
           setPendingDlc(null);
+          onSessionUpdate({ ...sessionData, ...data });
+          if (type === "dlc" && dlc && data.hasDlc) {
+            setTimeout(() => pressDlc(dlc), 400);
+          }
         }}
         sessionToken={sessionToken}
         sessionData={sessionData}

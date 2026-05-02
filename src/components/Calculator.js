@@ -58,6 +58,7 @@ export default function Calculator({ sessionToken, sessionData, onSessionUpdate 
   const [storedVal, setStoredVal]   = useState(null);
   const [pendingOp, setPendingOp]   = useState(null);
   const [justCalc, setJustCalc]     = useState(false);
+  const [freshInput, setFreshInput] = useState(false);
   const [paywallType, setPaywallType] = useState(null); // "result" | "dlc"
   const [pendingDlc, setPendingDlc] = useState(null);
   const [dlcResult, setDlcResult]   = useState(null);
@@ -84,35 +85,45 @@ export default function Calculator({ sessionToken, sessionData, onSessionUpdate 
   }, [paywallType, display, storedVal, pendingOp, justCalc, canCalc, expression]);
 
   // ── Core calc ─────────────────────────────────────────
-  function pressDigit(d) {
-    setDlcResult(null); setDlcTwoStep(null);
-    if (justCalc) { setDisplay(d); setExpression(d); setJustCalc(false); return; }
-    setDisplay(p => p === "0" ? d : p.length >= 15 ? p : p + d);
-    setExpression(p => p === "" ? d : p + d);
+function pressDigit(d) {
+  setDlcResult(null); setDlcTwoStep(null);
+  if (justCalc || freshInput) {
+    setDisplay(d);
+    setFreshInput(false);
+    setJustCalc(false);
+    return;
   }
+  setDisplay(p => p === "0" ? d : p.length >= 15 ? p : p + d);
+  setExpression(p => p === "" ? d : p + d);
+}
 
-  function pressDot() {
-    setDlcResult(null);
-    if (justCalc) { setDisplay("0."); setExpression("0."); setJustCalc(false); return; }
-    if (!display.includes(".")) {
-      setDisplay(p => p + "."); setExpression(p => p + ".");
-    }
+function pressDot() {
+  setDlcResult(null);
+  if (justCalc || freshInput) {
+    setDisplay("0."); setExpression(expression + "0.");
+    setFreshInput(false); setJustCalc(false); return;
   }
+  if (!display.includes(".")) {
+    setDisplay(p => p + "."); setExpression(p => p + ".");
+  }
+}
 
-  function pressOp(op) {
-    setDlcResult(null); setDlcTwoStep(null);
-    const val = parseFloat(display);
-    const sym = { "+":"+", "-":"−", "*":"×", "/":"÷" }[op];
-    if (storedVal !== null && pendingOp && !justCalc) {
-      const res = compute(storedVal, val, pendingOp);
-      setDisplay(fmt(res)); setStoredVal(res);
-      setExpression(fmt(res) + " " + sym + " ");
-    } else {
-      setStoredVal(val);
-      setExpression(display + " " + sym + " ");
-    }
-    setPendingOp(op); setJustCalc(false);
+function pressOp(op) {
+  setDlcResult(null); setDlcTwoStep(null);
+  const val = parseFloat(display);
+  const sym = { "+":"+", "-":"−", "*":"×", "/":"÷" }[op];
+  if (storedVal !== null && pendingOp && !justCalc && !freshInput) {
+    const res = compute(storedVal, val, pendingOp);
+    setDisplay(fmt(res)); setStoredVal(res);
+    setExpression(fmt(res) + " " + sym + " ");
+  } else {
+    setStoredVal(val);
+    setExpression(display + " " + sym + " ");
   }
+  setPendingOp(op);
+  setJustCalc(false);
+  setFreshInput(true); // ← flag: next digit mulai fresh
+}
 
   async function pressEquals() {
     if (!canCalc) { setPaywallType("result"); return; }
